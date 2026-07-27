@@ -1,0 +1,3 @@
+requests
+2captcha-python
+python-dotenv

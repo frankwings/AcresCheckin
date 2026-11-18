@@ -1,4 +1,5 @@
 from twocaptcha import TwoCaptcha
+from twocaptcha.solver import ValidationException
 import sys
 import random
 import json
@@ -14,6 +15,18 @@ load_dotenv()
 
 # 2Captcha 验证失败时最多重试次数（含首次，默认 3 次）
 MAX_CAPTCHA_RETRIES = 3
+
+# 2Captcha 服务临时故障（无空位/超时/网络）时的重试：次数与每次等待秒数（逐次递增）
+SOLVE_MAX_ATTEMPTS = 5
+SOLVE_BACKOFF_SECONDS = (30, 60, 90, 120)
+# 这些错误重试无意义（余额不足 / key 错误 / IP 被禁），直接失败
+FATAL_SOLVER_ERRORS = (
+	"ERROR_ZERO_BALANCE",
+	"ERROR_WRONG_USER_KEY",
+	"ERROR_KEY_DOES_NOT_EXIST",
+	"ERROR_IP_NOT_ALLOWED",
+	"IP_BANNED",
+)
 
 class OnePointThreeAcres:
 	def __init__(self, cookie: str, solver: TwoCaptcha):
@@ -37,12 +50,28 @@ class OnePointThreeAcres:
 		}
 
 	def _solve_turnstile(self, page_url: str) -> dict:
-		"""Solve a Cloudflare Turnstile captcha, returning the result dict."""
-		return self.solver.turnstile(
-			sitekey=self.cf_capcha_site_key,
-			url=page_url,
-			useragent=self.user_agent,
-		)
+		"""Solve a Cloudflare Turnstile captcha, returning the result dict.
+
+		Transient 2Captcha failures (ERROR_NO_SLOT_AVAILABLE, timeouts, network
+		errors) are retried with increasing backoff; fatal ones are re-raised.
+		"""
+		for attempt in range(1, SOLVE_MAX_ATTEMPTS + 1):
+			try:
+				return self.solver.turnstile(
+					sitekey=self.cf_capcha_site_key,
+					url=page_url,
+					useragent=self.user_agent,
+				)
+			except ValidationException:
+				raise
+			except Exception as err:
+				if any(code in str(err) for code in FATAL_SOLVER_ERRORS):
+					raise
+				if attempt == SOLVE_MAX_ATTEMPTS:
+					raise
+				wait = SOLVE_BACKOFF_SECONDS[min(attempt - 1, len(SOLVE_BACKOFF_SECONDS) - 1)]
+				print(f"  [Retry] 2captcha error '{err}' (attempt {attempt}/{SOLVE_MAX_ATTEMPTS}), retry in {wait}s", flush=True)
+				time.sleep(wait)
 
 	def _is_captcha_error(self, response_text: str) -> bool:
 		"""Check whether a 1point3acres API response indicates a captcha failure."""
